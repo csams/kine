@@ -17,6 +17,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 const (
@@ -33,8 +34,9 @@ type Config struct {
 	Listener             string
 	Endpoint             string
 	ConnectionPoolConfig generic.ConnectionPoolConfig
+	ServerTLSConfig      tls.Config
 
-	tls.Config
+	BackendTLSConfig tls.Config
 }
 
 type ETCDConfig struct {
@@ -48,7 +50,7 @@ func Listen(ctx context.Context, config Config) (ETCDConfig, error) {
 	if driver == ETCDBackend {
 		return ETCDConfig{
 			Endpoints:   strings.Split(config.Endpoint, ","),
-			TLSConfig:   config.Config,
+			TLSConfig:   config.BackendTLSConfig,
 			LeaderElect: true,
 		}, nil
 	}
@@ -68,7 +70,11 @@ func Listen(ctx context.Context, config Config) (ETCDConfig, error) {
 	}
 
 	b := server.New(backend)
-	grpcServer := grpcServer(config)
+	grpcServer, err := grpcServer(config)
+	if err != nil {
+		return ETCDConfig{}, err
+	}
+
 	b.Register(grpcServer)
 
 	listener, err := createListener(listen)
@@ -110,11 +116,21 @@ func createListener(listen string) (ret net.Listener, rerr error) {
 	return net.Listen(network, address)
 }
 
-func grpcServer(config Config) *grpc.Server {
+func grpcServer(config Config) (*grpc.Server, error) {
 	if config.GRPCServer != nil {
-		return config.GRPCServer
+		return config.GRPCServer, nil
 	}
-	return grpc.NewServer()
+
+	if config.ServerTLSConfig.CertFile != "" && config.ServerTLSConfig.KeyFile != "" {
+		certFile := config.ServerTLSConfig.CertFile
+		keyFile := config.ServerTLSConfig.KeyFile
+		creds, err := credentials.NewServerTLSFromFile(certFile, keyFile)
+		if err != nil {
+			return nil, err
+		}
+		return grpc.NewServer(grpc.Creds(creds)), nil
+	}
+	return grpc.NewServer(), nil
 }
 
 func getKineStorageBackend(ctx context.Context, driver, dsn string, cfg Config) (bool, server.Backend, error) {
@@ -130,9 +146,9 @@ func getKineStorageBackend(ctx context.Context, driver, dsn string, cfg Config) 
 	case DQLiteBackend:
 		backend, err = dqlite.New(ctx, dsn, cfg.ConnectionPoolConfig)
 	case PostgresBackend:
-		backend, err = pgsql.New(ctx, dsn, cfg.Config, cfg.ConnectionPoolConfig)
+		backend, err = pgsql.New(ctx, dsn, cfg.BackendTLSConfig, cfg.ConnectionPoolConfig)
 	case MySQLBackend:
-		backend, err = mysql.New(ctx, dsn, cfg.Config, cfg.ConnectionPoolConfig)
+		backend, err = mysql.New(ctx, dsn, cfg.BackendTLSConfig, cfg.ConnectionPoolConfig)
 	default:
 		return false, nil, fmt.Errorf("storage backend is not defined")
 	}
